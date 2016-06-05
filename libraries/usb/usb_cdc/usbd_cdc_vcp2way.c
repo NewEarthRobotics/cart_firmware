@@ -1,0 +1,304 @@
+/**
+  ******************************************************************************
+  * @file    usbd_cdc_vcp.c
+  * @author  MCD Application Team  WITH SIGNIFICANT HACK BY DS 12/12/2011
+  * @version V1.0.0
+  * @date    22-July-2011          WITH SIGNIFICANT HACK BY DS 12/12/2011
+  * @brief   Generic media access Layer.
+  ******************************************************************************
+  * @attention
+  *
+  * THE PRESENT FIRMWARE WHICH IS FOR GUIDANCE ONLY AIMS AT PROVIDING CUSTOMERS
+  * WITH CODING INFORMATION REGARDING THEIR PRODUCTS IN ORDER FOR THEM TO SAVE
+  * TIME. AS A RESULT, STMICROELECTRONICS SHALL NOT BE HELD LIABLE FOR ANY
+  * DIRECT, INDIRECT OR CONSEQUENTIAL DAMAGES WITH RESPECT TO ANY CLAIMS ARISING
+  * FROM THE CONTENT OF SUCH FIRMWARE AND/OR THE USE MADE BY CUSTOMERS OF THE
+  * CODING INFORMATION CONTAINED HEREIN IN CONNECTION WITH THEIR PRODUCTS.
+  *
+  * <h2><center>&copy; COPYRIGHT 2011 STMicroelectronics</center></h2>
+  ******************************************************************************
+  */ 
+
+/* Includes ------------------------------------------------------------------*/
+#include "usbd_cdc_vcp.h"
+#include "usbcdc_interface2way.h"   // DS added
+#include "usbd_cdc_core.h"
+#include "usbd_usr.h"
+#include "usbd_desc.h"
+#include "sysTimer.h"  // DS added
+
+#ifdef USB_OTG_HS_INTERNAL_DMA_ENABLED
+  #if defined ( __ICCARM__ ) /*!< IAR Compiler */
+    #pragma data_alignment = 4   
+  #endif
+#endif /* USB_OTG_HS_INTERNAL_DMA_ENABLED */
+__ALIGN_BEGIN USB_OTG_CORE_HANDLE  USB_OTG_dev __ALIGN_END;
+
+/* Public variables -----------------------------------------------------------*/
+volatile uint8_t USBCDCobjID;
+volatile uint16_t USBCDCinstance = 0;
+volatile uint8_t USBCDCobjPending = 0;
+volatile uint8_t USBCDC_Data[255];
+
+/* Private typedef -----------------------------------------------------------*/
+/* Private define ------------------------------------------------------------*/
+/* Private macro -------------------------------------------------------------*/
+/* Private variables ---------------------------------------------------------*/
+
+LINE_CODING linecoding =
+  {
+    115200, /* baud rate*/
+    0x00,   /* stop bits-1*/
+    0x00,   /* parity - none*/
+    0x08    /* nb. of bits 8*/
+  };
+
+
+/* These are external variables imported from CDC core to be used for IN 
+   transfer management. */
+extern uint8_t  APP_Rx_Buffer []; /* Write CDC received data in this buffer.
+                                     These data will be sent over USB IN endpoint
+                                     in the CDC core functions. */
+extern uint32_t APP_Rx_ptr_in;    /* Increment this pointer or roll it back to
+                                     start address when writing received data
+                                     in the buffer APP_Rx_Buffer. */
+
+extern uint32_t APP_Rx_ptr_out;    // DS added
+                                   // updated by the CDC core DO NOT CHANGE
+
+/* Private function prototypes -----------------------------------------------*/
+static uint16_t VCP_Init     (void);
+static uint16_t VCP_DeInit   (void);
+static uint16_t VCP_Ctrl     (uint32_t Cmd, uint8_t* Buf, uint32_t Len);
+static uint16_t VCP_DataTx   (uint8_t* Buf, uint32_t Len);
+static uint16_t VCP_DataRx   (uint8_t* Buf, uint32_t Len);
+
+CDC_IF_Prop_TypeDef VCP_fops = 
+{
+  VCP_Init,
+  VCP_DeInit,
+  VCP_Ctrl,
+  VCP_DataTx,
+  VCP_DataRx
+};
+
+/**************************/
+/**************************/
+static uint16_t VCP_Init(void)
+{
+  // nothing needed - removed com port
+  return USBD_OK;
+}
+
+/**************************/
+/**************************/
+static uint16_t VCP_DataTx(uint8_t* Buf, uint32_t Len)
+{
+  // nothing needed - removed com port
+  return USBD_OK;
+}
+
+/**************************/
+/**************************/
+static uint16_t VCP_DeInit(void)
+{
+
+  return USBD_OK;
+}
+
+
+/**************************/
+/**************************/
+static uint16_t VCP_Ctrl (uint32_t Cmd, uint8_t* Buf, uint32_t Len)
+{ 
+  switch (Cmd)
+  {
+  case SEND_ENCAPSULATED_COMMAND:
+    /* Not  needed for this driver */
+    break;
+
+  case GET_ENCAPSULATED_RESPONSE:
+    /* Not  needed for this driver */
+    break;
+
+  case SET_COMM_FEATURE:
+    /* Not  needed for this driver */
+    break;
+
+  case GET_COMM_FEATURE:
+    /* Not  needed for this driver */
+    break;
+
+  case CLEAR_COMM_FEATURE:
+    /* Not  needed for this driver */
+    break;
+
+  case SET_LINE_CODING:
+    /* Not  needed for this driver - removed com port */
+    break;
+
+  case GET_LINE_CODING:
+    Buf[0] = (uint8_t)(linecoding.bitrate);
+    Buf[1] = (uint8_t)(linecoding.bitrate >> 8);
+    Buf[2] = (uint8_t)(linecoding.bitrate >> 16);
+    Buf[3] = (uint8_t)(linecoding.bitrate >> 24);
+    Buf[4] = linecoding.format;
+    Buf[5] = linecoding.paritytype;
+    Buf[6] = linecoding.datatype; 
+    break;
+
+  case SET_CONTROL_LINE_STATE:
+    /* Not  needed for this driver */
+    break;
+
+  case SEND_BREAK:
+    /* Not  needed for this driver */
+    break;    
+    
+  default:
+    break;
+  }
+
+  return USBD_OK;
+}
+
+
+/**
+* USBCDC_Send_Data   Author: DS
+* Use this function to pass a buffer starting at "data" and of length size
+* over the USB CDC interface.  Note: will not return from this function until
+* the message is copied to send buffer if use_timeout=0. If use_timout=1 and
+* the buffer (2048 bytes) fills, then it will timeout after 1 second.
+*/
+
+uint16_t USBCDC_Send_Data(uint8_t* data, uint32_t size, uint8_t use_timeout)
+{
+  int32_t Rx_length=0;
+  int64_t SysTickMem;
+
+  Rx_length = (int32_t)APP_Rx_ptr_in - (int32_t)APP_Rx_ptr_out;
+  if (Rx_length < 0) Rx_length = APP_RX_DATA_SIZE+Rx_length;
+  
+  for(uint32_t i=0; i < size; i++)
+  {
+    SysTickMem = sysTimer.ticks;
+    while(Rx_length > (APP_RX_DATA_SIZE-2))
+    {    
+      Rx_length = (int32_t)APP_Rx_ptr_in - (int32_t)APP_Rx_ptr_out;
+      if (Rx_length < 0) Rx_length = APP_RX_DATA_SIZE+Rx_length;
+      if(use_timeout){
+        if ((sysTimer.ticks-SysTickMem)/sysTimer.freq >= 1){
+          return(0);                                          // 1 sec timeout
+        }
+      }
+    }
+    
+    APP_Rx_Buffer[APP_Rx_ptr_in] = data[i];
+
+    if(APP_Rx_ptr_in == (APP_RX_DATA_SIZE-1))  
+    {
+      APP_Rx_ptr_in = 0;                      // roll circular buffer over
+    }
+    else
+    {
+      APP_Rx_ptr_in++;                       
+    }
+    Rx_length++;
+  }
+  return (1);
+}
+
+/**************************/
+/**************************/
+void USBCDC_Config(void)
+{
+  USBD_Init(&USB_OTG_dev,
+            USB_OTG_FS_CORE_ID,
+            &USR_desc, 
+            &USBD_CDC_cb, 
+            &USR_cb);
+
+  NVIC->IP[OTG_FS_IRQn] = 0x70;    // Put USB (OTG_FS) interrupt in the middle   
+}
+
+/**************************/
+/**************************/
+void USBCDC_Disconnect (void)
+{
+    DCD_DevDisconnect(&USB_OTG_dev);
+    USB_OTG_StopDevice(&USB_OTG_dev);
+}
+
+/**************************/
+/**************************/
+static uint16_t VCP_DataRx (uint8_t* Buf, uint32_t Len)
+{
+  uint8_t msg_frame[3] = {'<', '{', '('};
+  static int8_t msgSectionIndex = -1;
+  static uint8_t objID = 0, num_body_bytes =0, bodyindex=0;
+  static uint16_t instance;
+  uint8_t crcByte;
+  uint32_t i;
+  
+  for (i = 0; i < Len; i++)
+  {
+    if (USBCDCobjPending==0)
+    {
+      switch(msgSectionIndex) 
+      {
+        case -1:                                // looking for first frame byte
+          if (*(Buf + i)==msg_frame[0]) msgSectionIndex++;
+          else {msgSectionIndex = -1; bodyindex=0;}
+          break;
+        case 0:                                 // looking for 2nd frame byte
+          if (*(Buf + i)==msg_frame[1]) msgSectionIndex++;
+          else {msgSectionIndex = -1; bodyindex=0;}
+          break;
+        case 1:                                 // looking for 3rd frame byte
+          if (*(Buf + i)==msg_frame[2]) {msgSectionIndex++; bodyindex=0;}
+          else {msgSectionIndex = -1; bodyindex=0;}
+          break;
+        case 2:                                 // pulling out id
+          objID = *(Buf+i);
+          msgSectionIndex++;
+          break;
+        case 3:                                 // pulling out byte one of instance
+          instance = *(Buf+i);
+          msgSectionIndex++;
+          break;
+        case 4:                                 // pulling out byte two of instance
+          instance += (uint16_t)(*(Buf+i))<<8;
+          msgSectionIndex++;
+          break;
+        case 5:                                 // pulling out length of data
+          num_body_bytes = *(Buf+i);
+          msgSectionIndex++;
+          if(num_body_bytes>255){msgSectionIndex = -1; bodyindex=0;} // never true with num_body_bytes as uint8
+          break;
+        case 6:                                // pulling out body
+            USBCDC_Data[bodyindex] = *(Buf+i);
+            bodyindex++;
+            if(bodyindex >= num_body_bytes) msgSectionIndex++;
+          break;
+        case 7:                                // looking for CR (0x0D) -- should add CRC check for serial
+          if (*(Buf + i)==0x0D) msgSectionIndex++;
+          else {msgSectionIndex = -1; bodyindex=0;}
+          break;
+        case 8:                                // looking for LF (0x0A) 
+          if (*(Buf + i)==0x0A)
+          {
+            msgSectionIndex = -1;
+            USBCDCobjID = objID;
+            USBCDCinstance = instance;
+            USBCDCobjPending = 1;
+          }
+          msgSectionIndex = -1; bodyindex=0;
+          break;
+        default:                                 // safety resest
+          {msgSectionIndex = -1; bodyindex=0;}
+      }
+    }
+   }
+   
+  return USBD_OK;
+}
